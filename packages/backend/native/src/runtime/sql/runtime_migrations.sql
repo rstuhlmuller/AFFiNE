@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS runtime_leases (
 CREATE INDEX IF NOT EXISTS runtime_leases_expires_at_idx
   ON runtime_leases (expires_at);
 
-CREATE TABLE IF NOT EXISTS blob_reconciliation_runs (
+CREATE TABLE IF NOT EXISTS storage_reconciliation_runs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   kind TEXT NOT NULL,
   mode TEXT NOT NULL,
@@ -54,10 +54,10 @@ CREATE TABLE IF NOT EXISTS blob_reconciliation_runs (
   metadata JSONB NOT NULL DEFAULT '{}'
 );
 
-CREATE INDEX IF NOT EXISTS blob_reconciliation_runs_workspace_idx
-  ON blob_reconciliation_runs (workspace_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS storage_reconciliation_runs_workspace_idx
+  ON storage_reconciliation_runs (workspace_id, started_at DESC);
 
-CREATE TABLE IF NOT EXISTS blob_reconciliation_checkpoints (
+CREATE TABLE IF NOT EXISTS storage_reconciliation_checkpoints (
   kind TEXT NOT NULL,
   scope TEXT NOT NULL,
   status TEXT NOT NULL,
@@ -70,8 +70,28 @@ CREATE TABLE IF NOT EXISTS blob_reconciliation_checkpoints (
   PRIMARY KEY (kind, scope)
 );
 
-CREATE INDEX IF NOT EXISTS blob_reconciliation_checkpoints_status_idx
-  ON blob_reconciliation_checkpoints (kind, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS storage_reconciliation_checkpoints_status_idx
+  ON storage_reconciliation_checkpoints (kind, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS document_cleanup_candidates (
+  workspace_id TEXT NOT NULL,
+  doc_id TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('marked', 'effects_pending', 'failed')),
+  missing_since TIMESTAMPTZ(3) NOT NULL,
+  last_observed_missing_at TIMESTAMPTZ(3) NOT NULL,
+  last_doc_activity_at TIMESTAMPTZ(3),
+  cleanup_payload JSONB NOT NULL DEFAULT '{}',
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  error TEXT,
+  updated_at TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (workspace_id, doc_id)
+);
+
+CREATE INDEX IF NOT EXISTS document_cleanup_candidates_status_missing_idx
+  ON document_cleanup_candidates (status, missing_since);
+
+CREATE INDEX IF NOT EXISTS document_cleanup_candidates_workspace_status_idx
+  ON document_cleanup_candidates (workspace_id, status, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS doc_blob_refs (
   workspace_id TEXT NOT NULL,
@@ -92,6 +112,31 @@ CREATE INDEX IF NOT EXISTS doc_blob_refs_workspace_blob_idx
 
 CREATE INDEX IF NOT EXISTS doc_blob_refs_workspace_status_idx
   ON doc_blob_refs (workspace_id, status);
+
+CREATE TABLE IF NOT EXISTS doc_blob_ref_projections (
+  workspace_id TEXT NOT NULL,
+  doc_id TEXT NOT NULL,
+  source_revision TIMESTAMPTZ(3),
+  source_fingerprint TEXT,
+  parser_version INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'fresh', 'failed', 'missing')),
+  indexed_at TIMESTAMPTZ(3),
+  error_code TEXT,
+  error_summary TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  updated_at TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (workspace_id, doc_id),
+  CHECK (status <> 'fresh' OR (source_revision IS NOT NULL AND indexed_at IS NOT NULL)),
+  CHECK (error_summary IS NULL OR octet_length(error_summary) <= 512)
+);
+
+ALTER TABLE doc_blob_ref_projections ADD COLUMN IF NOT EXISTS source_fingerprint TEXT;
+
+CREATE INDEX IF NOT EXISTS doc_blob_ref_projections_workspace_status_idx
+  ON doc_blob_ref_projections (workspace_id, status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS doc_blob_ref_projections_workspace_revision_idx
+  ON doc_blob_ref_projections (workspace_id, source_revision);
 
 CREATE TABLE IF NOT EXISTS blob_cleanup_candidates (
   workspace_id TEXT NOT NULL,
@@ -197,3 +242,22 @@ CREATE TABLE IF NOT EXISTS runtime_invite_abuse_actions (
 
 CREATE INDEX IF NOT EXISTS runtime_invite_abuse_actions_status_next_attempt_idx
   ON runtime_invite_abuse_actions (status, next_attempt_at);
+
+CREATE TABLE IF NOT EXISTS runtime_doc_creators (
+  workspace_id VARCHAR NOT NULL,
+  doc_id VARCHAR NOT NULL,
+  created_by VARCHAR REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  created_at TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (workspace_id, doc_id)
+);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'runtime_doc_creators_created_by_fkey'
+  ) THEN
+    ALTER TABLE runtime_doc_creators
+      ADD CONSTRAINT runtime_doc_creators_created_by_fkey
+      FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE;
+  END IF;
+END $$;

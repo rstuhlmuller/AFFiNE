@@ -8,9 +8,10 @@ import {
   type AuthTokenResponse,
   classifyAuthError,
 } from '@affine/auth';
-import { app, net, safeStorage } from 'electron';
+import { app, safeStorage } from 'electron';
 
 import { logger } from '../logger';
+import { authFetch } from './transport';
 
 const FILEPATH = path.join(app.getPath('userData'), 'auth-sessions.json');
 const TEMP_FILEPATH = `${FILEPATH}.tmp`;
@@ -104,8 +105,12 @@ function storage(endpoint: string) {
   };
 }
 
-async function refresh(endpoint: string, refreshToken: string) {
-  const response = await net.fetch(
+async function refresh(
+  endpoint: string,
+  refreshToken: string,
+  attemptId?: string
+) {
+  const response = await authFetch(
     new URL('/api/auth/session/refresh', endpoint).toString(),
     {
       method: 'POST',
@@ -113,6 +118,7 @@ async function refresh(endpoint: string, refreshToken: string) {
         'content-type': 'application/json',
         'x-affine-client-kind': 'native',
         'x-affine-version': BUILD_CONFIG.appVersion,
+        ...(attemptId ? { 'x-affine-refresh-attempt': attemptId } : {}),
       },
       body: JSON.stringify({ refreshToken }),
       signal: AbortSignal.timeout(AUTH_REQUEST_TIMEOUT),
@@ -135,11 +141,21 @@ export function getAuthSessionBroker(endpoint: string) {
   let broker = brokers.get(normalized);
   if (!broker) {
     broker = new AuthTokenBroker(storage(normalized), {
-      refresh: (token: string) => refresh(normalized, token),
+      refresh: (token, attemptId) => refresh(normalized, token, attemptId),
     });
     brokers.set(normalized, broker);
   }
   return broker;
+}
+
+export async function initializeAuthSessions() {
+  for (const endpoint of Object.keys(await readStore())) {
+    try {
+      getAuthSessionBroker(endpoint);
+    } catch (error) {
+      logger.error('failed to initialize auth session', endpoint, error);
+    }
+  }
 }
 
 export function isManagedAuthEndpoint(url: string) {
@@ -192,7 +208,7 @@ export async function revokeAuthSession(endpoint: string) {
   await getAuthSessionBroker(normalized).revoke(
     'sign-out',
     async (refreshToken: string) => {
-      const response = await net.fetch(
+      const response = await authFetch(
         new URL('/api/auth/session/revoke', normalized).toString(),
         {
           method: 'POST',

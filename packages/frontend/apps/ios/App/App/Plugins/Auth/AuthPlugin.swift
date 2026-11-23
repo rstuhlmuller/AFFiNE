@@ -1,3 +1,4 @@
+import AffineGraphQL
 import Capacitor
 import Foundation
 import Security
@@ -29,11 +30,16 @@ private struct StoredAuthTokenPair: Codable {
 
 private struct AuthErrorResponse: Decodable {
   let code: String?
+  let name: String?
+  let message: String?
 }
 
-private struct AuthServerError: Error {
+private struct AuthServerError: Error, CustomStringConvertible {
   let code: String?
   let statusCode: Int
+  let message: String
+
+  var description: String { message }
 
   var permanentlyInvalidatesSession: Bool {
     switch code {
@@ -44,6 +50,14 @@ private struct AuthServerError: Error {
       return false
     }
   }
+}
+
+private func authServerError(_ data: Data, statusCode: Int) -> AuthServerError {
+  let response = try? JSONDecoder().decode(AuthErrorResponse.self, from: data)
+  return AuthServerError(
+    code: response?.code ?? response?.name,
+    statusCode: statusCode,
+    message: response?.message ?? "Authentication request failed with status \(statusCode)")
 }
 
 private struct AuthOperationCancelled: Error {}
@@ -58,21 +72,25 @@ private actor AuthSessionBroker {
   private var refreshTasks: [String: AuthRefreshOperation] = [:]
   private var mutationEpochs: [String: UInt] = [:]
 
-  func store(_ endpoint: String, response: AuthTokenResponse) throws {
+  func store(_ endpoint: String, response: AuthTokenResponse) throws -> StoredAuthTokenPair {
     invalidateRefresh(canonicalEndpoint(endpoint))
-    try write(endpoint, tokenPair(response))
+    let pair = try tokenPair(response)
+    try write(endpoint, pair)
+    return pair
   }
 
-  func validAccessToken(_ endpoint: String, minValidity: TimeInterval = 120) async throws -> String? {
+  func validAccessToken(_ endpoint: String, minValidity: TimeInterval = 120) async throws
+    -> StoredAuthTokenPair?
+  {
     guard let pair = try read(endpoint) else { return nil }
     if pair.accessExpiresAt.timeIntervalSinceNow > minValidity {
-      return pair.accessToken
+      return pair
     }
-    return try await refresh(endpoint).accessToken
+    return try await refresh(endpoint)
   }
 
-  func refreshAccessToken(_ endpoint: String) async throws -> String {
-    try await refresh(endpoint).accessToken
+  func refreshAccessToken(_ endpoint: String) async throws -> StoredAuthTokenPair {
+    try await refresh(endpoint)
   }
 
   func signOut(_ endpoint: String) async throws {
@@ -149,7 +167,9 @@ private actor AuthSessionBroker {
       session: response.session)
   }
 
-  private func request(_ endpoint: String, action: String, body: [String: String]) async throws -> Data {
+  private func request(_ endpoint: String, action: String, body: [String: String]) async throws
+    -> Data
+  {
     guard let url = URL(string: "\(canonicalEndpoint(endpoint))\(action)") else {
       throw AuthError.invalidEndpoint
     }
@@ -168,9 +188,7 @@ private actor AuthSessionBroker {
           throw AuthError.internalError
         }
         if response.statusCode < 400 { return data }
-        let error = AuthServerError(
-          code: try? JSONDecoder().decode(AuthErrorResponse.self, from: data).code,
-          statusCode: response.statusCode)
+        let error = authServerError(data, statusCode: response.statusCode)
         guard response.statusCode >= 500, attempt < 2 else { throw error }
       } catch let error as AuthServerError {
         if error.statusCode < 500 || attempt == 2 { throw error }
@@ -255,6 +273,7 @@ public class AuthPlugin: CAPPlugin, CAPBridgedPlugin {
   public let identifier = "AuthPlugin"
   public let jsName = "Auth"
   public let pluginMethods: [CAPPluginMethod] = [
+    CAPPluginMethod(name: "showNativeSignIn", returnType: CAPPluginReturnPromise),
     CAPPluginMethod(name: "signInMagicLink", returnType: CAPPluginReturnPromise),
     CAPPluginMethod(name: "signInOauth", returnType: CAPPluginReturnPromise),
     CAPPluginMethod(name: "signInOpenApp", returnType: CAPPluginReturnPromise),
@@ -267,6 +286,32 @@ public class AuthPlugin: CAPPlugin, CAPBridgedPlugin {
 
   private let broker = AuthSessionBroker()
   private let authCookieNames = Set(["affine_session", "affine_user_id", "affine_csrf_token"])
+  private var isNativeSignInPresented = false
+
+  @objc public func showNativeSignIn(_ call: CAPPluginCall) {
+    Task { @MainActor [weak self] in
+      guard let self else {
+        call.reject("Failed to show native sign-in")
+        return
+      }
+
+      do {
+        let webView = try self.webView.get("AFFiNE is still loading. Please try again in a moment.")
+        if self.isNativeSignInPresented {
+          call.resolve(["success": false])
+          return
+        }
+
+        self.isNativeSignInPresented = true
+        defer { self.isNativeSignInPresented = false }
+
+        let isSignedIn = try await PaywallAuthGuard.ensureSignedIn(using: webView)
+        call.resolve(["success": isSignedIn])
+      } catch {
+        call.reject("Failed to show native sign-in", nil, error)
+      }
+    }
+  }
 
   private func canonicalEndpoint(_ endpoint: String) -> String {
     guard let url = URL(string: endpoint), let scheme = url.scheme, let host = url.host else {
@@ -291,8 +336,12 @@ public class AuthPlugin: CAPPlugin, CAPBridgedPlugin {
     Task {
       do {
         let endpoint = try call.getStringEnsure("endpoint")
-        let token = try await broker.validAccessToken(endpoint)
-        call.resolve(["token": token ?? NSNull()])
+        let pair = try await broker.validAccessToken(endpoint)
+        if let pair {
+          AuthAccessTokenCache.shared.set(
+            pair.accessToken, expiresAt: pair.accessExpiresAt, for: endpoint)
+        }
+        call.resolve(["token": pair?.accessToken ?? NSNull()])
       } catch {
         call.reject("Failed to get access token, \(error)", nil, error)
       }
@@ -302,7 +351,9 @@ public class AuthPlugin: CAPPlugin, CAPBridgedPlugin {
   @objc public func clearEndpointSession(_ call: CAPPluginCall) {
     Task {
       do {
-        try await broker.clear(call.getStringEnsure("endpoint"))
+        let endpoint = try call.getStringEnsure("endpoint")
+        try await broker.clear(endpoint)
+        AuthAccessTokenCache.shared.remove(for: endpoint)
         call.resolve(["ok": true])
       } catch {
         call.reject("Failed to clear auth session, \(error)", nil, error)
@@ -313,8 +364,11 @@ public class AuthPlugin: CAPPlugin, CAPBridgedPlugin {
   @objc public func refreshAccessToken(_ call: CAPPluginCall) {
     Task {
       do {
-        let token = try await broker.refreshAccessToken(call.getStringEnsure("endpoint"))
-        call.resolve(["token": token])
+        let endpoint = try call.getStringEnsure("endpoint")
+        let pair = try await broker.refreshAccessToken(endpoint)
+        AuthAccessTokenCache.shared.set(
+          pair.accessToken, expiresAt: pair.accessExpiresAt, for: endpoint)
+        call.resolve(["token": pair.accessToken])
       } catch {
         call.reject("Failed to refresh access token, \(error)", nil, error)
       }
@@ -336,12 +390,7 @@ public class AuthPlugin: CAPPlugin, CAPBridgedPlugin {
           ], body: ["email": email, "token": token, "client_nonce": clientNonce])
 
         if response.statusCode >= 400 {
-          if let textBody = String(data: data, encoding: .utf8) {
-            call.reject(textBody)
-          } else {
-            call.reject("Failed to sign in")
-          }
-          return
+          throw authServerError(data, statusCode: response.statusCode)
         }
 
         try await self.exchangeSession(endpoint, data)
@@ -367,12 +416,7 @@ public class AuthPlugin: CAPPlugin, CAPBridgedPlugin {
           ], body: ["code": code, "state": state, "client_nonce": clientNonce])
 
         if response.statusCode >= 400 {
-          if let textBody = String(data: data, encoding: .utf8) {
-            call.reject(textBody)
-          } else {
-            call.reject("Failed to sign in")
-          }
-          return
+          throw authServerError(data, statusCode: response.statusCode)
         }
 
         try await self.exchangeSession(endpoint, data)
@@ -398,16 +442,12 @@ public class AuthPlugin: CAPPlugin, CAPBridgedPlugin {
             "x-affine-client-kind": "native",
             "x-captcha-token": verifyToken,
             "x-captcha-challenge": challenge,
-            "x-captcha-provider": verifyToken == nil ? nil : (challenge == nil ? "turnstile" : "hashcash"),
+            "x-captcha-provider": verifyToken == nil
+              ? nil : (challenge == nil ? "turnstile" : "hashcash"),
           ], body: ["email": email, "password": password])
 
         if response.statusCode >= 400 {
-          if let textBody = String(data: data, encoding: .utf8) {
-            call.reject(textBody)
-          } else {
-            call.reject("Failed to sign in")
-          }
-          return
+          throw authServerError(data, statusCode: response.statusCode)
         }
 
         try await self.exchangeSession(endpoint, data)
@@ -431,12 +471,7 @@ public class AuthPlugin: CAPPlugin, CAPBridgedPlugin {
           ], body: ["code": code])
 
         if response.statusCode >= 400 {
-          if let textBody = String(data: data, encoding: .utf8) {
-            call.reject(textBody)
-          } else {
-            call.reject("Failed to sign in")
-          }
-          return
+          throw authServerError(data, statusCode: response.statusCode)
         }
 
         try await self.exchangeSession(endpoint, data)
@@ -452,6 +487,7 @@ public class AuthPlugin: CAPPlugin, CAPBridgedPlugin {
       do {
         let endpoint = try call.getStringEnsure("endpoint")
         try await broker.signOut(endpoint)
+        AuthAccessTokenCache.shared.remove(for: endpoint)
         self.clearAuthCookies(endpoint)
         call.resolve(["ok": true])
       } catch {
@@ -476,7 +512,8 @@ public class AuthPlugin: CAPPlugin, CAPBridgedPlugin {
       endpoint, method: "POST", action: "/api/auth/session/exchange",
       headers: [
         "x-affine-client-kind": "native"
-      ], body: [
+      ],
+      body: [
         "code": code,
         "installationId": self.installationId(),
         "platform": "ios",
@@ -484,10 +521,13 @@ public class AuthPlugin: CAPPlugin, CAPBridgedPlugin {
       ])
 
     if response.statusCode >= 400 {
-      throw AuthError.exchangeFailed
+      throw authServerError(data, statusCode: response.statusCode)
     }
 
-    try await broker.store(endpoint, response: JSONDecoder().decode(AuthTokenResponse.self, from: data))
+    let pair = try await broker.store(
+      endpoint, response: JSONDecoder().decode(AuthTokenResponse.self, from: data))
+    AuthAccessTokenCache.shared.set(
+      pair.accessToken, expiresAt: pair.accessExpiresAt, for: endpoint)
     self.clearAuthCookies(endpoint)
   }
 
@@ -506,7 +546,8 @@ public class AuthPlugin: CAPPlugin, CAPBridgedPlugin {
     let normalizedHost = host.lowercased()
 
     HTTPCookieStorage.shared.cookies?.forEach { cookie in
-      let domain = cookie.domain.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+      let domain = cookie.domain.lowercased().trimmingCharacters(
+        in: CharacterSet(charactersIn: "."))
       let domainMatches = normalizedHost == domain || normalizedHost.hasSuffix(".\(domain)")
       if domainMatches && authCookieNames.contains(cookie.name) {
         HTTPCookieStorage.shared.deleteCookie(cookie)

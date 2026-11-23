@@ -83,7 +83,7 @@ export function consumeTagDraftFromTableCellHost(
   return host?.consumeTagDraft?.();
 }
 
-class TagManager {
+export class TagManager {
   changeTag = (option: Partial<SelectTag>) => {
     this.ops.onOptionsChange(
       this.ops.options.value.map(item => {
@@ -129,12 +129,13 @@ class TagManager {
   filteredOptions$ = computed(() => {
     let matched = false;
     const options: RenderOption[] = [];
+    const filterText = this.text$.value.toLocaleLowerCase();
     for (const option of this.options$.value) {
+      const label = option.value?.trim() ? option.value : 'Untitled';
       if (
-        !this.text$.value ||
-        option.value
-          .toLocaleLowerCase()
-          .includes(this.text$.value.toLocaleLowerCase())
+        !filterText ||
+        label.toLocaleLowerCase().includes(filterText) ||
+        option.value.toLocaleLowerCase().includes(filterText)
       ) {
         options.push({
           ...option,
@@ -217,6 +218,7 @@ export class MultiTagSelect extends SignalWatcher(
         items: [
           menu.input({
             initialValue: option.value,
+            placeholder: 'Untitled',
             onChange: text => {
               this.tagManager.changeTag({
                 id: option.id,
@@ -360,12 +362,16 @@ export class MultiTagSelect extends SignalWatcher(
       backgroundColor: color,
     });
     return html` <div class="${tagContainerStyle}" style=${style}>
-      <div data-testid="tag-name" class="${tagTextStyle}">${name}</div>
-      ${onDelete
-        ? html` <div class="${tagDeleteIconStyle}" @click="${onDelete}">
-            ${CloseIcon()}
-          </div>`
-        : nothing}
+      <div data-testid="tag-name" class="${tagTextStyle}">
+        ${name?.trim() ? name : 'Untitled'}
+      </div>
+      ${
+        onDelete
+          ? html` <div class="${tagDeleteIconStyle}" @click="${onDelete}">
+              ${CloseIcon()}
+            </div>`
+          : nothing
+      }
     </div>`;
   }
 
@@ -402,27 +408,31 @@ export class MultiTagSelect extends SignalWatcher(
                 @click="${select.select}"
               >
                 <div class="${selectOptionContentStyle}">
-                  ${select.isCreate
-                    ? html` <div class="${selectOptionNewIconStyle}">
-                        Create
-                      </div>`
-                    : html`
-                        <div
-                          ${dragHandler(select.id)}
-                          class="${selectOptionDragHandlerStyle}"
-                        ></div>
-                      `}
+                  ${
+                    select.isCreate
+                      ? html` <div class="${selectOptionNewIconStyle}">
+                          Create
+                        </div>`
+                      : html`
+                          <div
+                            ${dragHandler(select.id)}
+                            class="${selectOptionDragHandlerStyle}"
+                          ></div>
+                        `
+                  }
                   ${this.renderTag(select.value, select.color)}
                 </div>
-                ${!select.isCreate
-                  ? html` <div
-                      class="${selectOptionIconStyle}"
-                      @click="${clickOption}"
-                      data-testid="option-more"
-                    >
-                      ${MoreHorizontalIcon()}
-                    </div>`
-                  : null}
+                ${
+                  !select.isCreate
+                    ? html` <div
+                        class="${selectOptionIconStyle}"
+                        @click="${clickOption}"
+                        data-testid="option-more"
+                      >
+                        ${MoreHorizontalIcon()}
+                      </div>`
+                    : null
+                }
               </div>
             `;
           }
@@ -549,7 +559,9 @@ const popMobileTagSelect = (target: PopupTarget, ops: TagSelectOptions) => {
                   width: 'max-content',
                 });
                 return html` <div class="${tagContainerStyle}" style=${style}>
-                  <div class="${tagTextStyle}">${option.value}</div>
+                  <div class="${tagTextStyle}">
+                    ${option.value?.trim() ? option.value : 'Untitled'}
+                  </div>
                   <div
                     class="${tagDeleteIconStyle}"
                     @click="${(e: MouseEvent) => {
@@ -586,11 +598,17 @@ const popMobileTagSelect = (target: PopupTarget, ops: TagSelectOptions) => {
                     });
                     return html`
                       <div style="display: flex; align-items:center;">
-                        ${option.isCreate
-                          ? html` <div style="margin-right: 8px;">Create</div>`
-                          : ''}
+                        ${
+                          option.isCreate
+                            ? html` <div style="margin-right: 8px;">
+                                Create
+                              </div>`
+                            : ''
+                        }
                         <div class="${tagContainerStyle}" style=${style}>
-                          <div class="${tagTextStyle}">${option.value}</div>
+                          <div class="${tagTextStyle}">
+                            ${option.value?.trim() ? option.value : 'Untitled'}
+                          </div>
                         </div>
                       </div>
                     `;

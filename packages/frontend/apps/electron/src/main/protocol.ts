@@ -14,6 +14,7 @@ import {
 import {
   executeAuthSessionRequest,
   getAccessTokenForUrl,
+  initializeAuthSessions,
   isManagedAuthEndpoint,
 } from './auth/auth-session';
 import { buildType, isDev } from './config';
@@ -202,7 +203,7 @@ function allowCors(
   headers: Record<string, string[]>,
   origin: string = 'assets://.'
 ) {
-  // Signed blob URLs redirect to *.usercontent.affine.pro without CORS headers.
+  // Object-storage upload and Copilot URLs do not include application CORS headers.
   setHeader(headers, 'Access-Control-Allow-Origin', origin);
   setHeader(headers, 'Access-Control-Allow-Credentials', 'true');
   setHeader(headers, 'Access-Control-Allow-Methods', 'GET, HEAD, PUT, OPTIONS');
@@ -213,7 +214,9 @@ function allowCors(
   );
 }
 
-export function registerProtocol() {
+export async function registerProtocol() {
+  await initializeAuthSessions();
+
   protocol.handle('assets', request => {
     return handleFileRequest(request);
   });
@@ -225,7 +228,7 @@ export function registerProtocol() {
         if (responseHeaders) {
           const { protocol, hostname } = new URL(url);
 
-          // Adjust CORS for assets responses and allow blob redirects on affine domains
+          // Adjust CORS for local assets and application-owned object storage.
           if (protocol === 'assets:') {
             delete responseHeaders['access-control-allow-origin'];
             delete responseHeaders['access-control-allow-headers'];

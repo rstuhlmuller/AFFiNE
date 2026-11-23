@@ -1,4 +1,4 @@
-// eslint-disable eslint-plugin-unicorn(prefer-dom-node-dataset
+// oxlint-disable unicorn/prefer-dom-node-dataset
 import type { Page } from '@playwright/test';
 import { expect } from '@playwright/test';
 
@@ -144,8 +144,8 @@ export class ChatPanelUtils {
     expect(history).toHaveLength(expected.length);
     const assistantStage = {
       loading: 1,
-      transmitting: 1,
-      success: 2,
+      transmitting: 2,
+      success: 3,
     } as const;
 
     history.forEach((message, index) => {

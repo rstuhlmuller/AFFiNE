@@ -11,6 +11,7 @@ const runtime = vi.hoisted(() => ({
   failWrite: false,
   files: new Map<string, string>(),
   fetch: vi.fn(),
+  fromPartition: vi.fn(),
   rename: vi.fn(),
 }));
 
@@ -41,7 +42,12 @@ vi.mock('node:fs/promises', () => ({
 
 vi.mock('electron', () => ({
   app: { getPath: () => '/test-user-data' },
-  net: { fetch: runtime.fetch },
+  session: {
+    fromPartition: (...args: unknown[]) => {
+      runtime.fromPartition(...args);
+      return { fetch: runtime.fetch };
+    },
+  },
   safeStorage: {
     isEncryptionAvailable: () => runtime.encryptionAvailable,
     getSelectedStorageBackend: () => runtime.backend,
@@ -58,6 +64,8 @@ import {
   clearAuthSession,
   executeAuthSessionRequest,
   getValidAccessToken,
+  initializeAuthSessions,
+  isManagedAuthEndpoint,
   normalizeEndpoint,
   revokeAuthSession,
   setAuthSession,
@@ -68,6 +76,7 @@ beforeEach(() => {
   runtime.backend = 'unknown';
   runtime.failWrite = false;
   runtime.fetch.mockReset();
+  runtime.fromPartition.mockClear();
   runtime.rename.mockClear();
 });
 
@@ -80,9 +89,32 @@ test.each([
   expect(normalizeEndpoint(endpoint)).toBe(expected);
 });
 
-test('atomically persists one encrypted token-pair record', async () => {
+test('loads and atomically persists one encrypted token-pair record', async () => {
   const endpoint = 'https://persistent.example';
   const pair = tokenResponse('access-persistent', 'p', 900);
+  runtime.files.set(
+    sessionFile,
+    JSON.stringify({
+      [endpoint]: Buffer.from(
+        JSON.stringify({
+          version: 1,
+          tokenType: pair.tokenType,
+          accessToken: pair.accessToken,
+          accessExpiresAt: new Date(
+            Date.now() + pair.expiresIn * 1000
+          ).toISOString(),
+          refreshToken: pair.refreshToken,
+          refreshExpiresAt: pair.refreshExpiresAt,
+          session: pair.session,
+        })
+      ).toString('base64'),
+    })
+  );
+
+  expect(isManagedAuthEndpoint(endpoint)).toBe(false);
+  await initializeAuthSessions();
+  expect(isManagedAuthEndpoint(endpoint)).toBe(true);
+  expect(await getValidAccessToken(endpoint)).toBe('access-persistent');
 
   await expect(setAuthSession(endpoint, pair)).resolves.toEqual({
     persistent: true,
@@ -138,6 +170,9 @@ test('shares one refresh across concurrent main-process callers', async () => {
 
   expect(tokens.every(token => token === 'fresh')).toBe(true);
   expect(runtime.fetch).toHaveBeenCalledTimes(1);
+  expect(runtime.fromPartition).toHaveBeenCalledWith('affine-auth-transport', {
+    cache: false,
+  });
 });
 
 test('preserves credentials for unknown refresh errors', async () => {
@@ -200,10 +235,18 @@ test('recovers an unreadable session file on the next atomic write', async () =>
 test('does not publish a rotated pair until an atomic save succeeds', async () => {
   const endpoint = 'https://save-failure.example';
   await setAuthSession(endpoint, tokenResponse('old', 'a', 1));
-  runtime.fetch.mockResolvedValueOnce(
-    new Response(JSON.stringify(tokenResponse('rotated', 'b', 900)))
-  );
-  runtime.failWrite = true;
+  runtime.fetch.mockImplementationOnce(async (_url, request) => {
+    const stored = JSON.parse(runtime.files.get(sessionFile)!)[endpoint];
+    const attempted = JSON.parse(Buffer.from(stored, 'base64').toString());
+    expect(request.headers['x-affine-refresh-attempt']).toBe(
+      attempted.refreshAttemptId
+    );
+    expect(JSON.parse(request.body)).toEqual({
+      refreshToken: attempted.refreshToken,
+    });
+    runtime.failWrite = true;
+    return new Response(JSON.stringify(tokenResponse('rotated', 'b', 900)));
+  });
 
   await expect(getValidAccessToken(endpoint, 120_000)).rejects.toMatchObject({
     code: 'AUTH_TOKEN_STORAGE_UNAVAILABLE',

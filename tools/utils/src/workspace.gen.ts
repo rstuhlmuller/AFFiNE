@@ -1209,6 +1209,7 @@ export const PackageList = [
     location: 'packages/frontend/apps/electron',
     name: '@affine/electron',
     workspaceDependencies: [
+      'tools/cli',
       'tools/utils',
       'packages/common/auth',
       'packages/frontend/i18n',
@@ -1400,6 +1401,11 @@ export const PackageList = [
     ],
   },
   {
+    location: 'tools/@types/assets',
+    name: '@types/assets',
+    workspaceDependencies: [],
+  },
+  {
     location: 'tools/@types/build-config',
     name: '@types/build-config',
     workspaceDependencies: [],
@@ -1417,7 +1423,7 @@ export const PackageList = [
   {
     location: 'tools/cli',
     name: '@affine-tools/cli',
-    workspaceDependencies: ['tools/utils', 'packages/common/s3-compat'],
+    workspaceDependencies: ['tools/utils'],
   },
   {
     location: 'tools/commitlint',
@@ -1442,7 +1448,7 @@ export const PackageList = [
   {
     location: 'tools/revert-update',
     name: '@affine/revert-update',
-    workspaceDependencies: ['tools/cli'],
+    workspaceDependencies: ['tools/cli', 'packages/backend/native'],
   },
   {
     location: 'tools/utils',
@@ -1563,6 +1569,7 @@ export type PackageName =
   | '@affine-test/affine-mobile'
   | '@affine-test/blocksuite'
   | '@affine-test/kit'
+  | '@types/assets'
   | '@types/build-config'
   | '@types/affine__env'
   | '@affine/changelog'

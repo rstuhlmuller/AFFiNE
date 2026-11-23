@@ -24,7 +24,9 @@ export type TextToTextOptions = {
   runId?: string;
   isRootSession?: boolean;
   reasoning?: boolean;
+  profileId?: string;
   modelId?: string;
+  routeTargetId?: string;
   toolsConfig?: AIToolsConfig;
 };
 
@@ -32,14 +34,15 @@ export type ToImageOptions = TextToTextOptions & {
   seed?: string;
 };
 
-async function resizeImage(blob: Blob | File): Promise<Blob | null> {
+async function resizeImage(blob: Blob | File): Promise<Blob> {
   let src = '';
   try {
     src = URL.createObjectURL(blob);
     const img = new Image();
-    img.src = src;
-    await new Promise(resolve => {
-      img.onload = resolve;
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('Unable to load image attachment.'));
+      img.src = src;
     });
 
     const canvas = document.createElement('canvas');
@@ -48,19 +51,30 @@ async function resizeImage(blob: Blob | File): Promise<Blob | null> {
     canvas.height = Math.floor(img.height * scale);
 
     const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      return await new Promise(resolve =>
-        canvas.toBlob(blob => resolve(blob), 'image/jpeg', 0.8)
-      );
+    if (!ctx) {
+      throw new Error('Unable to prepare image attachment.');
     }
-  } catch (e) {
-    console.error(e);
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return await new Promise<Blob>((resolve, reject) =>
+      canvas.toBlob(
+        blob =>
+          blob
+            ? resolve(blob)
+            : reject(new Error('Unable to encode image attachment.')),
+        'image/webp',
+        0.8
+      )
+    );
   } finally {
     if (src) URL.revokeObjectURL(src);
   }
-  return null;
+}
+
+function imageFileName(name: string, mimeType: string) {
+  const stem = name.replace(/\.[^./\\]+$/, '');
+  const extension = mimeType.slice('image/'.length);
+  return `${stem || 'image'}.${extension}`;
 }
 
 interface CreateMessageOptions {
@@ -95,17 +109,26 @@ async function createMessage({
       attachment => typeof attachment === 'string'
     ) as [string[], (Blob | File)[]];
     options.attachments = stringAttachments;
-    options.blobs = (
-      await Promise.all(
-        blobs.map(resizeImage).map(async blob => {
-          const file = await blob;
-          if (!file) return null;
-          return new File([file], sessionId, {
-            type: file.type,
-          });
-        })
-      )
-    ).filter(Boolean) as File[];
+    options.blobs = await Promise.all(
+      blobs.map(async blob => {
+        const file = blob.type.startsWith('image/')
+          ? await resizeImage(blob)
+          : blob;
+        const resized = file !== blob;
+        return new File(
+          [file],
+          resized
+            ? imageFileName(
+                blob instanceof File ? blob.name : sessionId,
+                file.type
+              )
+            : blob instanceof File
+              ? blob.name
+              : sessionId,
+          { type: file.type }
+        );
+      })
+    );
   }
 
   return await client.createMessage(options, { timeout, signal });
@@ -127,7 +150,9 @@ export function textToText({
   actionVersion,
   runId,
   reasoning,
+  profileId,
   modelId,
+  routeTargetId,
   toolsConfig,
 }: TextToTextOptions) {
   let messageId: string | undefined;
@@ -161,7 +186,9 @@ export function textToText({
             sessionId,
             messageId,
             reasoning,
+            profileId,
             modelId,
+            routeTargetId,
             toolsConfig,
             actionId,
             actionVersion,
@@ -229,7 +256,9 @@ export function textToText({
           sessionId,
           messageId,
           reasoning,
+          profileId,
           modelId,
+          routeTargetId,
           toolsConfig,
           actionId,
           actionVersion,

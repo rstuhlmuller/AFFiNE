@@ -9,20 +9,8 @@ export class AppConfigModel extends BaseModel {
   async load(excludedKeys: string[] = []) {
     return this.db.appConfig.findMany({
       where: excludedKeys.length ? { id: { notIn: excludedKeys } } : undefined,
+      orderBy: { id: 'asc' },
     });
-  }
-
-  @Transactional()
-  async save(user: string, updates: Array<{ key: string; value: any }>) {
-    return await Promise.allSettled(
-      updates.map(async update => {
-        return this.db.appConfig.upsert({
-          where: { id: update.key },
-          update: { value: update.value, lastUpdatedBy: user },
-          create: { id: update.key, value: update.value, lastUpdatedBy: user },
-        });
-      })
-    );
   }
 
   async get(key: string) {
