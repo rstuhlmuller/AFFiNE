@@ -207,10 +207,7 @@ export class WorkspaceMcpProvider {
 
     const tools = [readDocument, docSearch];
 
-    if (
-      accessMode === McpAccessMode.READ_WRITE &&
-      (env.dev || env.namespaces.canary)
-    ) {
+    if (accessMode === McpAccessMode.READ_WRITE) {
       const createDocument = defineTool({
         name: 'create_document',
         title: 'Create Document',

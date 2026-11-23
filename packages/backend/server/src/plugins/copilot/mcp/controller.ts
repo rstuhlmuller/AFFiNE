@@ -74,7 +74,9 @@ export class WorkspaceMcpController {
     @Param('workspaceId') workspaceId: string
   ) {
     const abortController = new AbortController();
-    req.on('close', () => abortController.abort());
+    res.once('close', () => {
+      if (!res.writableFinished) abortController.abort();
+    });
 
     try {
       const token =

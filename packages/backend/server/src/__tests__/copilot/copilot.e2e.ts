@@ -350,6 +350,59 @@ test('image SSE emits persisted attachment events for action sessions', async t 
   t.truthy(attachment?.data);
 });
 
+test('MCP read/write credentials can create and update documents', async t => {
+  const { app } = t.context;
+  await app.signupV1();
+  const workspace = await createWorkspace(app);
+  const settings = await app.gql({
+    query: mcpCredentialsQuery,
+    variables: { workspaceId: workspace.id },
+  });
+  t.true(settings.mcpCredentialReadWriteAvailable);
+
+  const { createMcpCredential } = await app.gql({
+    query: createMcpCredentialMutation,
+    variables: {
+      input: {
+        workspaceId: workspace.id,
+        name: 'Document editor',
+        accessMode: GraphqlMcpAccessMode.READ_WRITE,
+        expirationDays: 90,
+      },
+    },
+  });
+
+  const callTool = async (name: string, args: Record<string, unknown>) => {
+    const response = await app
+      .POST(`/api/workspaces/${workspace.id}/mcp`)
+      .set('Authorization', `Bearer ${createMcpCredential.token}`)
+      .send({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name, arguments: args },
+      })
+      .expect(200);
+    const { result } = response.body;
+    t.falsy(result.isError, result.content[0].text);
+    return result.content[0].text as string;
+  };
+
+  const { docId } = JSON.parse(
+    await callTool('create_document', {
+      title: 'Meeting notes',
+      content: 'First draft',
+    })
+  );
+  t.truthy(docId);
+  t.regex(await callTool('read_document', { docId }), /First draft/);
+
+  await callTool('update_document', { docId, content: 'Final draft' });
+  const updated = await callTool('read_document', { docId });
+  t.regex(updated, /Final draft/);
+  t.notRegex(updated, /First draft/);
+});
+
 test('MCP credentials remain endpoint-bound through rotate, revoke and expiry', async t => {
   const { app } = t.context;
   const credentials = app.get(McpCredentialService);
